@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE en-export SYSTEM "http://xml.evernote.com/pub/evernote-export4.dtd">
+<en-export export-date="20240115T120000Z" application="Evernote" version="10.0">
+  <note>
+    <title>Test Note One</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
+<en-note><p>This is a test note with some text content.</p></en-note>]]></content>
+    <created>20240101T100000Z</created>
+    <updated>20240115T120000Z</updated>
+    <tag>receipts</tag>
+    <tag>2024</tag>
+    <note-attributes>
+      <author>testuser</author>
+      <source>desktop.win</source>
+    </note-attributes>
+  </note>
+  <note>
+    <title>Note With Attachment</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
+<en-note><p>Note with a PDF attached.</p></en-note>]]></content>
+    <created>20240210T080000Z</created>
+    <tag>invoices</tag>
+    <resource>
+      <data encoding="base64">
+        SGVsbG8gV29ybGQ=
+      </data>
+      <mime>application/pdf</mime>
+      <resource-attributes>
+        <file-name>invoice.pdf</file-name>
+      </resource-attributes>
+    </resource>
+    <resource>
+      <data encoding="base64">
+        iVBORw0KGgo=
+      </data>
+      <mime>image/png</mime>
+      <resource-attributes>
+        <file-name>screenshot.png</file-name>
+      </resource-attributes>
+    </resource>
+    <note-attributes>
+      <source-url>https://example.com/invoice</source-url>
+    </note-attributes>
+  </note>
+  <note>
+    <title>Plain Note</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
+<en-note><p>A simple note with no tags or attachments.</p></en-note>]]></content>
+    <created>20240301T090000Z</created>
+  </note>
+</en-export>
