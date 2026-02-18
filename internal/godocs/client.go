@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -50,12 +51,18 @@ type Job struct {
 	Status string `json:"status"`
 }
 
+// UploadResult holds the response from the godocs upload API.
+type UploadResult struct {
+	Path string `json:"path"`
+	ULID string `json:"ulid"`
+	Name string `json:"name"`
+}
+
 // Upload sends a file to godocs via the upload API.
-// Returns the uploaded path on success.
-func (c *Client) Upload(filePath, destPath string) (string, error) {
+func (c *Client) Upload(filePath, destPath string) (*UploadResult, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("opening file: %w", err)
+		return nil, fmt.Errorf("opening file: %w", err)
 	}
 	defer f.Close()
 
@@ -64,90 +71,91 @@ func (c *Client) Upload(filePath, destPath string) (string, error) {
 
 	part, err := w.CreateFormFile("file", filepath.Base(filePath))
 	if err != nil {
-		return "", fmt.Errorf("creating form file: %w", err)
+		return nil, fmt.Errorf("creating form file: %w", err)
 	}
 	if _, err := io.Copy(part, f); err != nil {
-		return "", fmt.Errorf("copying file data: %w", err)
+		return nil, fmt.Errorf("copying file data: %w", err)
 	}
 
 	if destPath != "" {
 		if err := w.WriteField("path", destPath); err != nil {
-			return "", fmt.Errorf("writing path field: %w", err)
+			return nil, fmt.Errorf("writing path field: %w", err)
 		}
 	}
 	w.Close()
 
-	req, err := http.NewRequest("POST", c.BaseURL+"/api/document/upload", &buf)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("upload request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("upload failed (status %d): %s", resp.StatusCode, body)
-	}
-
-	var result struct {
-		Body string `json:"body"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		// Some versions return plain text
-		return string(body), nil
-	}
-	return result.Body, nil
+	return c.doUpload(&buf, w.FormDataContentType())
 }
 
 // UploadBytes uploads in-memory content as a file to godocs.
-func (c *Client) UploadBytes(content []byte, fileName, destPath string) (string, error) {
+func (c *Client) UploadBytes(content []byte, fileName, destPath string) (*UploadResult, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 
 	part, err := w.CreateFormFile("file", fileName)
 	if err != nil {
-		return "", fmt.Errorf("creating form file: %w", err)
+		return nil, fmt.Errorf("creating form file: %w", err)
 	}
 	if _, err := part.Write(content); err != nil {
-		return "", fmt.Errorf("writing content: %w", err)
+		return nil, fmt.Errorf("writing content: %w", err)
 	}
 
 	if destPath != "" {
 		if err := w.WriteField("path", destPath); err != nil {
-			return "", fmt.Errorf("writing path field: %w", err)
+			return nil, fmt.Errorf("writing path field: %w", err)
 		}
 	}
 	w.Close()
 
-	req, err := http.NewRequest("POST", c.BaseURL+"/api/document/upload", &buf)
+	return c.doUpload(&buf, w.FormDataContentType())
+}
+
+func (c *Client) doUpload(body io.Reader, contentType string) (*UploadResult, error) {
+	req, err := http.NewRequest("POST", c.BaseURL+"/api/document/upload", body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("upload request: %w", err)
+		return nil, fmt.Errorf("upload request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("upload failed (status %d): %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("upload failed (status %d): %s", resp.StatusCode, respBody)
 	}
 
-	var result struct {
-		Body string `json:"body"`
+	var result UploadResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return &UploadResult{Path: string(respBody)}, nil
 	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return string(body), nil
+	return &result, nil
+}
+
+// LookupByHash looks up a document by its MD5 file hash.
+func (c *Client) LookupByHash(hash string) (*Document, error) {
+	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/document/lookup?hash=%s", c.BaseURL, url.QueryEscape(hash)))
+	if err != nil {
+		return nil, err
 	}
-	return result.Body, nil
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("lookup failed (status %d): %s", resp.StatusCode, b)
+	}
+
+	var doc Document
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 // GetTags returns all tags from godocs.
@@ -249,7 +257,7 @@ func (c *Client) SetDimension(ulid, dimensionName, value string) error {
 
 // SearchDocument searches for a document by term and returns the first match.
 func (c *Client) SearchDocument(term string) (*Document, error) {
-	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/search?term=%s", c.BaseURL, term))
+	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/search?term=%s", c.BaseURL, url.QueryEscape(term)))
 	if err != nil {
 		return nil, err
 	}

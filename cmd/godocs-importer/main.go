@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,8 @@ func main() {
 		cmdCheck(os.Args[2:])
 	case "import":
 		cmdImport(os.Args[2:])
+	case "ping":
+		cmdPing(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -35,32 +38,84 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: godocs-importer <command> [options]
+	fmt.Fprintf(os.Stderr, `Usage: godocs-importer <command> [flags] <file.enex>
+
+Note: flags must come before the filename.
 
 Commands:
-  walk   <file.enex>                         List notes in an ENEX file
-  check  <file.enex> [--db imports.db]       Check import status
-  import <file.enex> --godocs-url <url>      Import into godocs
-                     [--db imports.db]
-                     [--dest-path <path>]
+  walk   [-n count] <file.enex>
+  check  [-n count] [--db imports.db] <file.enex>
+  import --godocs-url <url> [-n count] [--db imports.db] [--dest-path <path>] <file.enex>
+  ping   --godocs-url <url>
 `)
 }
 
-func cmdWalk(args []string) {
-	if len(args) < 1 {
-		log.Fatal("usage: godocs-importer walk <file.enex>")
+func cmdPing(args []string) {
+	fs := flag.NewFlagSet("ping", flag.ExitOnError)
+	godocsURL := fs.String("godocs-url", "", "godocs server URL (required)")
+	fs.Parse(args)
+
+	if *godocsURL == "" {
+		log.Fatal("usage: godocs-importer ping --godocs-url <url>")
 	}
-	enexPath := args[0]
+
+	fmt.Printf("Pinging %s ...\n", *godocsURL)
+
+	// Test basic connectivity
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(*godocsURL)
+	if err != nil {
+		fmt.Printf("  connection: FAIL — %v\n", err)
+		os.Exit(1)
+	}
+	resp.Body.Close()
+	fmt.Printf("  connection: OK (status %d)\n", resp.StatusCode)
+
+	// Test API endpoints
+	for _, endpoint := range []string{"/api/tags", "/api/jobs/active", "/api/documents/latest?page=0"} {
+		resp, err := client.Get(*godocsURL + endpoint)
+		if err != nil {
+			fmt.Printf("  %s: FAIL — %v\n", endpoint, err)
+			continue
+		}
+		resp.Body.Close()
+		fmt.Printf("  %s: %d\n", endpoint, resp.StatusCode)
+	}
+
+	// Test upload endpoint (OPTIONS/HEAD to check it exists without uploading)
+	resp, err = client.Head(*godocsURL + "/api/document/upload")
+	if err != nil {
+		fmt.Printf("  /api/document/upload: FAIL — %v\n", err)
+	} else {
+		resp.Body.Close()
+		fmt.Printf("  /api/document/upload: %d\n", resp.StatusCode)
+	}
+}
+
+func cmdWalk(args []string) {
+	fs := flag.NewFlagSet("walk", flag.ExitOnError)
+	maxNotes := fs.Int("n", 0, "max notes to show (0 = all)")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		log.Fatal("usage: godocs-importer walk <file.enex> [-n count]")
+	}
+	enexPath := fs.Arg(0)
 
 	export, err := enex.ParseFile(enexPath)
 	if err != nil {
 		log.Fatalf("parse error: %v", err)
 	}
 
-	fmt.Printf("ENEX file: %s\n", enexPath)
-	fmt.Printf("Notes: %d\n\n", len(export.Notes))
+	notes := export.Notes
+	if *maxNotes > 0 && *maxNotes < len(notes) {
+		notes = notes[:*maxNotes]
+	}
 
-	for i, note := range export.Notes {
+	fmt.Printf("ENEX file: %s\n", enexPath)
+	fmt.Printf("Notes: %d (showing %d)\n\n", len(export.Notes), len(notes))
+
+	for i, note := range notes {
 		fmt.Printf("[%d] %s\n", i+1, note.Title)
 		fmt.Printf("    Created:    %s\n", note.Created.Format(time.RFC3339))
 		if !note.Updated.IsZero() {
@@ -85,6 +140,7 @@ func cmdWalk(args []string) {
 func cmdCheck(args []string) {
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	dbPath := fs.String("db", "imports.db", "tracker database path")
+	maxNotes := fs.Int("n", 0, "max notes to check (0 = all)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -103,9 +159,14 @@ func cmdCheck(args []string) {
 	}
 	defer trk.Close()
 
+	notes := export.Notes
+	if *maxNotes > 0 && *maxNotes < len(notes) {
+		notes = notes[:*maxNotes]
+	}
+
 	var pending, imported, errored int
 
-	for i, note := range export.Notes {
+	for i, note := range notes {
 		hash := enex.NoteHash(&note)
 
 		// Check note content (resource_index -2)
@@ -156,6 +217,7 @@ func cmdImport(args []string) {
 	dbPath := fs.String("db", "imports.db", "tracker database path")
 	godocsURL := fs.String("godocs-url", "", "godocs server URL (required)")
 	destPath := fs.String("dest-path", "evernote", "destination path in godocs")
+	maxNotes := fs.Int("n", 0, "max notes to import (0 = all)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 || *godocsURL == "" {
@@ -177,47 +239,61 @@ func cmdImport(args []string) {
 	client := godocs.NewClient(*godocsURL)
 	enexBase := filepath.Base(enexPath)
 
-	for i, note := range export.Notes {
+	notes := export.Notes
+	if *maxNotes > 0 && *maxNotes < len(notes) {
+		notes = notes[:*maxNotes]
+	}
+
+	for i, note := range notes {
 		hash := enex.NoteHash(&note)
 
-		// Always upload note body as HTML
-		importNoteContent(client, trk, enexBase, &note, hash, *destPath, i)
+		// Always upload note body as HTML — capture ULID for tags/dimensions
+		contentULID := importNoteContent(client, trk, enexBase, &note, hash, *destPath, i)
 
 		// Upload each resource (attachment)
 		for j, res := range note.Resources {
 			importResource(client, trk, enexBase, &note, hash, &res, j, *destPath, i)
 		}
 
-		// Apply tags and dimensions to uploaded documents
-		applyTags(client, trk, &note, hash)
-		applyDimensions(client, &note)
+		// Apply tags and dimensions using the content document ULID
+		applyTags(client, trk, &note, hash, contentULID)
+		applyDimensions(client, &note, contentULID)
 	}
 
 	fmt.Println("\nImport complete.")
 }
 
 // importNoteContent uploads the note body as an HTML file.
-// Uses resource_index -2 in the tracker to distinguish from the legacy no-resource case (-1).
-func importNoteContent(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash, destPath string, noteIdx int) {
+// Returns the godocs ULID for the uploaded document (empty if failed or already imported).
+func importNoteContent(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash, destPath string, noteIdx int) string {
 	if trk.IsImported(hash, -2) {
 		fmt.Printf("[%d] %s (content) — already imported\n", noteIdx+1, note.Title)
-		return
+		// Retrieve stored ULID
+		rec, _ := trk.GetRecord(hash, -2)
+		if rec != nil {
+			return rec.GodocsULID
+		}
+		return ""
 	}
 
 	safeName := safeFileName(note.Title) + ".html"
 	uploadPath := filepath.Join(destPath, safeName)
 
 	content := []byte(note.Content)
-	uploadedPath, err := client.UploadBytes(content, safeName, destPath)
+	result, err := client.UploadBytes(content, safeName, destPath)
 	if err != nil {
 		fmt.Printf("[%d] %s (content) — upload error: %v\n", noteIdx+1, note.Title, err)
 		trk.RecordImport(enexFile, note.Title, hash, -2, "", tracker.StatusError)
 		trk.UpdateStatus(hash, -2, tracker.StatusError, err.Error())
-		return
+		return ""
 	}
 
-	fmt.Printf("[%d] %s (content) — uploaded to %s\n", noteIdx+1, note.Title, uploadedPath)
+	fmt.Printf("[%d] %s (content) — uploaded to %s (ULID: %s)\n", noteIdx+1, note.Title, result.Path, result.ULID)
 	trk.RecordImport(enexFile, note.Title, hash, -2, uploadPath, tracker.StatusUploaded)
+	if result.ULID != "" {
+		trk.SetULID(hash, -2, result.ULID)
+	}
+	return result.ULID
 }
 
 func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash string, res *enex.Resource, resIdx int, destPath string, noteIdx int) {
@@ -247,7 +323,7 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 	}
 
 	uploadPath := filepath.Join(destPath, fileName)
-	uploadedPath, err := client.UploadBytes(data, fileName, destPath)
+	result, err := client.UploadBytes(data, fileName, destPath)
 	if err != nil {
 		fmt.Printf("[%d] %s / %s — upload error: %v\n", noteIdx+1, note.Title, fileName, err)
 		trk.RecordImport(enexFile, note.Title, hash, resIdx, "", tracker.StatusError)
@@ -255,24 +331,19 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		return
 	}
 
-	fmt.Printf("[%d] %s / %s — uploaded to %s\n", noteIdx+1, note.Title, fileName, uploadedPath)
+	fmt.Printf("[%d] %s / %s — uploaded to %s\n", noteIdx+1, note.Title, fileName, result.Path)
 	trk.RecordImport(enexFile, note.Title, hash, resIdx, uploadPath, tracker.StatusUploaded)
+	if result.ULID != "" {
+		trk.SetULID(hash, resIdx, result.ULID)
+	}
 }
 
-func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string) {
+func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string) {
 	if len(note.Tags) == 0 {
 		return
 	}
-
-	// Wait briefly for ingestion to process uploads
-	if err := client.WaitForIngestion(30 * time.Second); err != nil {
-		fmt.Printf("  warning: ingestion wait: %v\n", err)
-	}
-
-	// Find the uploaded document(s) by searching for the note title
-	doc, err := client.SearchDocument(note.Title)
-	if err != nil || doc == nil {
-		fmt.Printf("  warning: could not find uploaded document for %q to apply tags\n", note.Title)
+	if ulid == "" {
+		fmt.Printf("  skipping tags for %q — no ULID\n", note.Title)
 		return
 	}
 
@@ -282,8 +353,10 @@ func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, has
 			fmt.Printf("  warning: ensure tag %q: %v\n", tagName, err)
 			continue
 		}
-		if err := client.AddTag(doc.ULID, tagID); err != nil {
-			fmt.Printf("  warning: add tag %q to %s: %v\n", tagName, doc.ULID, err)
+		if err := client.AddTag(ulid, tagID); err != nil {
+			fmt.Printf("  warning: add tag %q to %s: %v\n", tagName, ulid, err)
+		} else {
+			fmt.Printf("  tag %q → %s\n", tagName, ulid)
 		}
 	}
 
@@ -294,7 +367,7 @@ func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, has
 	}
 }
 
-func applyDimensions(client *godocs.Client, note *enex.Note) {
+func applyDimensions(client *godocs.Client, note *enex.Note, ulid string) {
 	dims := map[string]string{}
 	if !note.Created.IsZero() {
 		dims["created_date"] = note.Created.Format(time.RFC3339)
@@ -314,16 +387,14 @@ func applyDimensions(client *godocs.Client, note *enex.Note) {
 	if len(dims) == 0 {
 		return
 	}
-
-	doc, err := client.SearchDocument(note.Title)
-	if err != nil || doc == nil {
-		fmt.Printf("  warning: could not find document for %q to apply dimensions\n", note.Title)
+	if ulid == "" {
+		fmt.Printf("  skipping dimensions for %q — no ULID\n", note.Title)
 		return
 	}
 
 	for name, value := range dims {
-		if err := client.SetDimension(doc.ULID, name, value); err != nil {
-			fmt.Printf("  warning: set dimension %q on %s: %v\n", name, doc.ULID, err)
+		if err := client.SetDimension(ulid, name, value); err != nil {
+			fmt.Printf("  warning: set dimension %q on %s: %v\n", name, ulid, err)
 		}
 	}
 }
