@@ -38,11 +38,10 @@ tasks:
     cmds:
       - rm -rf bin/
 
-  release:*:*:
-    desc: 'Release a version, e.g.: task release:v0.1.0:"initial release"'
-    vars:
-      TAG: "{{index .MATCH 0}}"
-      BUILD: "{{index .MATCH 1}}"
+  release:
+    desc: 'Release a version, e.g.: task release VERSION=v0.1.0 COMMENT="initial release"'
+    requires:
+      vars: [VERSION, COMMENT]
     preconditions:
       - sh: git diff --quiet
         msg: "Working tree is dirty — commit or stash changes first"
@@ -50,6 +49,6 @@ tasks:
         msg: "Staged changes exist — commit or stash them first"
     cmds:
       - task: check
-      - git tag "{{.TAG}}" -m "{{.BUILD}}"
-      - git push origin "{{.TAG}}"
+      - git tag "{{.VERSION}}" -m "{{.COMMENT}}"
+      - git push origin "{{.VERSION}}"
       - git push
