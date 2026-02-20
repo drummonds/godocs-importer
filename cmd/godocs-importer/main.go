@@ -166,16 +166,17 @@ func cmdCheck(args []string) {
 
 	var pending, imported, errored int
 
+	var contentOnly int
+
 	for i, note := range notes {
 		hash := enex.NoteHash(&note)
 
-		// Check note content (resource_index -2)
-		rec, _ := trk.GetRecord(hash, -2)
-		status := statusLabel(rec)
-		fmt.Printf("[%d] %s (content) — %s\n", i+1, note.Title, status)
-		countStatus(status, &pending, &imported, &errored)
+		if len(note.Resources) == 0 {
+			fmt.Printf("[%d] %s — content-only (skipped)\n", i+1, note.Title)
+			contentOnly++
+			continue
+		}
 
-		// Check each resource
 		for j, res := range note.Resources {
 			name := res.Attributes.FileName
 			if name == "" {
@@ -186,6 +187,10 @@ func cmdCheck(args []string) {
 			fmt.Printf("[%d] %s / %s — %s\n", i+1, note.Title, name, status)
 			countStatus(status, &pending, &imported, &errored)
 		}
+	}
+
+	if contentOnly > 0 {
+		fmt.Printf("\n%d content-only notes (no attachments) — not imported\n", contentOnly)
 	}
 
 	fmt.Printf("\nSummary: %d pending, %d imported, %d errors\n", pending, imported, errored)
@@ -244,66 +249,49 @@ func cmdImport(args []string) {
 		notes = notes[:*maxNotes]
 	}
 
+	var imported, skippedHTML, skippedAlready, errored, warnings int
+
 	for i, note := range notes {
 		hash := enex.NoteHash(&note)
 
-		// Always upload note body as HTML — capture ULID for tags/dimensions
-		contentULID := importNoteContent(client, trk, enexBase, &note, hash, *destPath, i)
-
-		// Upload each resource (attachment)
-		for j, res := range note.Resources {
-			importResource(client, trk, enexBase, &note, hash, &res, j, *destPath, i)
+		if len(note.Resources) == 0 {
+			// Note with no attachments — content-only, skip (HTML not supported)
+			fmt.Printf("[%d] %s — skipped (content-only note)\n", i+1, note.Title)
+			skippedHTML++
+			continue
 		}
 
-		// Apply tags and dimensions using the content document ULID
-		applyTags(client, trk, &note, hash, contentULID)
-		applyDimensions(client, &note, contentULID)
+		// Upload each resource, capture first ULID for tags/dimensions
+		var firstULID string
+		for j, res := range note.Resources {
+			ulid := importResource(client, trk, enexBase, &note, hash, &res, j, *destPath, i, &imported, &skippedAlready, &errored)
+			if firstULID == "" && ulid != "" {
+				firstULID = ulid
+			}
+		}
+
+		applyTags(client, trk, &note, hash, firstULID, &warnings)
+		applyMetadata(client, &note, firstULID, &warnings)
 	}
 
-	fmt.Println("\nImport complete.")
+	fmt.Printf("\nImport complete: %d uploaded, %d already imported, %d content-only skipped, %d errors, %d warnings\n",
+		imported, skippedAlready, skippedHTML, errored, warnings)
 }
 
-// importNoteContent uploads the note body as an HTML file.
-// Returns the godocs ULID for the uploaded document (empty if failed or already imported).
-func importNoteContent(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash, destPath string, noteIdx int) string {
-	if trk.IsImported(hash, -2) {
-		fmt.Printf("[%d] %s (content) — already imported\n", noteIdx+1, note.Title)
-		// Retrieve stored ULID
-		rec, _ := trk.GetRecord(hash, -2)
+func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash string, res *enex.Resource, resIdx int, destPath string, noteIdx int, imported, skippedAlready, errored *int) string {
+	name := res.Attributes.FileName
+	if name == "" {
+		name = fmt.Sprintf("resource_%d", resIdx)
+	}
+
+	if trk.IsImported(hash, resIdx) {
+		fmt.Printf("[%d] %s / %s — already imported\n", noteIdx+1, note.Title, name)
+		*skippedAlready++
+		rec, _ := trk.GetRecord(hash, resIdx)
 		if rec != nil {
 			return rec.GodocsULID
 		}
 		return ""
-	}
-
-	safeName := safeFileName(note.Title) + ".html"
-	uploadPath := filepath.Join(destPath, safeName)
-
-	content := []byte(note.Content)
-	result, err := client.UploadBytes(content, safeName, destPath)
-	if err != nil {
-		fmt.Printf("[%d] %s (content) — upload error: %v\n", noteIdx+1, note.Title, err)
-		trk.RecordImport(enexFile, note.Title, hash, -2, "", tracker.StatusError)
-		trk.UpdateStatus(hash, -2, tracker.StatusError, err.Error())
-		return ""
-	}
-
-	fmt.Printf("[%d] %s (content) — uploaded to %s (ULID: %s)\n", noteIdx+1, note.Title, result.Path, result.ULID)
-	trk.RecordImport(enexFile, note.Title, hash, -2, uploadPath, tracker.StatusUploaded)
-	if result.ULID != "" {
-		trk.SetULID(hash, -2, result.ULID)
-	}
-	return result.ULID
-}
-
-func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash string, res *enex.Resource, resIdx int, destPath string, noteIdx int) {
-	if trk.IsImported(hash, resIdx) {
-		name := res.Attributes.FileName
-		if name == "" {
-			name = fmt.Sprintf("resource_%d", resIdx)
-		}
-		fmt.Printf("[%d] %s / %s — already imported\n", noteIdx+1, note.Title, name)
-		return
 	}
 
 	// Decode base64 resource data
@@ -312,7 +300,8 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		fmt.Printf("[%d] %s / resource %d — base64 decode error: %v\n", noteIdx+1, note.Title, resIdx, err)
 		trk.RecordImport(enexFile, note.Title, hash, resIdx, "", tracker.StatusError)
 		trk.UpdateStatus(hash, resIdx, tracker.StatusError, err.Error())
-		return
+		*errored++
+		return ""
 	}
 
 	// Determine filename
@@ -328,22 +317,26 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		fmt.Printf("[%d] %s / %s — upload error: %v\n", noteIdx+1, note.Title, fileName, err)
 		trk.RecordImport(enexFile, note.Title, hash, resIdx, "", tracker.StatusError)
 		trk.UpdateStatus(hash, resIdx, tracker.StatusError, err.Error())
-		return
+		*errored++
+		return ""
 	}
 
 	fmt.Printf("[%d] %s / %s — uploaded to %s\n", noteIdx+1, note.Title, fileName, result.Path)
 	trk.RecordImport(enexFile, note.Title, hash, resIdx, uploadPath, tracker.StatusUploaded)
+	*imported++
 	if result.ULID != "" {
 		trk.SetULID(hash, resIdx, result.ULID)
 	}
+	return result.ULID
 }
 
-func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string) {
+func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string, warnings *int) {
 	if len(note.Tags) == 0 {
 		return
 	}
 	if ulid == "" {
-		fmt.Printf("  skipping tags for %q — no ULID\n", note.Title)
+		fmt.Printf("  warning: skipping tags for %q — no ULID\n", note.Title)
+		*warnings++
 		return
 	}
 
@@ -351,51 +344,52 @@ func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, has
 		tagID, err := client.EnsureTag(tagName)
 		if err != nil {
 			fmt.Printf("  warning: ensure tag %q: %v\n", tagName, err)
+			*warnings++
 			continue
 		}
 		if err := client.AddTag(ulid, tagID); err != nil {
 			fmt.Printf("  warning: add tag %q to %s: %v\n", tagName, ulid, err)
+			*warnings++
 		} else {
 			fmt.Printf("  tag %q → %s\n", tagName, ulid)
 		}
 	}
 
-	// Update tracker status for content and all resources
-	trk.UpdateStatus(hash, -2, tracker.StatusTagged, "")
+	// Update tracker status for all resources
 	for j := range note.Resources {
 		trk.UpdateStatus(hash, j, tracker.StatusTagged, "")
 	}
 }
 
-func applyDimensions(client *godocs.Client, note *enex.Note, ulid string) {
-	dims := map[string]string{}
-	if !note.Created.IsZero() {
-		dims["created_date"] = note.Created.Format(time.RFC3339)
-	}
-	if !note.Updated.IsZero() {
-		dims["updated_date"] = note.Updated.Format(time.RFC3339)
-	}
-	if note.Attributes.Author != "" {
-		dims["author"] = note.Attributes.Author
-	}
-	if note.Attributes.SourceURL != "" {
-		dims["source_url"] = note.Attributes.SourceURL
-	}
-	if note.Attributes.Source != "" {
-		dims["source"] = note.Attributes.Source
-	}
-	if len(dims) == 0 {
-		return
-	}
+func applyMetadata(client *godocs.Client, note *enex.Note, ulid string, warnings *int) {
 	if ulid == "" {
-		fmt.Printf("  skipping dimensions for %q — no ULID\n", note.Title)
+		fmt.Printf("  warning: skipping metadata for %q — no ULID\n", note.Title)
+		*warnings++
 		return
 	}
 
-	for name, value := range dims {
-		if err := client.SetDimension(ulid, name, value); err != nil {
-			fmt.Printf("  warning: set dimension %q on %s: %v\n", name, ulid, err)
-		}
+	var meta godocs.MetadataUpdate
+	if !note.Created.IsZero() {
+		t := note.Created.Time
+		meta.CreatedDate = &t
+	}
+	if !note.Updated.IsZero() {
+		t := note.Updated.Time
+		meta.UpdatedDate = &t
+	}
+	if note.Attributes.Author != "" {
+		meta.Author = &note.Attributes.Author
+	}
+	if note.Attributes.SourceURL != "" {
+		meta.SourceURL = &note.Attributes.SourceURL
+	}
+	if note.Attributes.Source != "" {
+		meta.Source = &note.Attributes.Source
+	}
+
+	if err := client.UpdateMetadata(ulid, meta); err != nil {
+		fmt.Printf("  warning: update metadata for %q: %v\n", note.Title, err)
+		*warnings++
 	}
 }
 

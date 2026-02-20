@@ -232,17 +232,25 @@ func (c *Client) AddTag(ulid string, tagID int) error {
 	return nil
 }
 
-// SetDimension sets a dimension value on a document.
-func (c *Client) SetDimension(ulid, dimensionName, value string) error {
-	body, _ := json.Marshal(map[string]string{
-		"dimension_name": dimensionName,
-		"value":          value,
-	})
-	resp, err := c.HTTPClient.Post(
-		fmt.Sprintf("%s/api/documents/%s/dimensions", c.BaseURL, ulid),
-		"application/json",
-		bytes.NewReader(body),
-	)
+// MetadataUpdate holds optional metadata fields for a document.
+type MetadataUpdate struct {
+	CreatedDate *time.Time `json:"created_date,omitempty"`
+	UpdatedDate *time.Time `json:"updated_date,omitempty"`
+	Author      *string    `json:"author,omitempty"`
+	SourceURL   *string    `json:"source_url,omitempty"`
+	Source      *string    `json:"source,omitempty"`
+}
+
+// UpdateMetadata sets metadata fields on a document via PUT /api/document/:id/metadata.
+func (c *Client) UpdateMetadata(ulid string, meta MetadataUpdate) error {
+	body, _ := json.Marshal(meta)
+	req, err := http.NewRequest("PUT", fmt.Sprintf("%s/api/document/%s/metadata", c.BaseURL, ulid), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -250,7 +258,7 @@ func (c *Client) SetDimension(ulid, dimensionName, value string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("set dimension failed (status %d): %s", resp.StatusCode, b)
+		return fmt.Errorf("update metadata failed (status %d): %s", resp.StatusCode, b)
 	}
 	return nil
 }

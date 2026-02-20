@@ -7,7 +7,6 @@
 - [x] CLI: walk / check / import
 
 ## Future
-- Batch import progress bar
 - Note content HTML cleanup (strip ENML-specific tags)
 - Support for multiple ENEX files in one command
 - Dry-run mode for import
