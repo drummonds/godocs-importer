@@ -235,4 +235,3 @@ func (c *Client) UpdateMetadata(ulid string, meta MetadataUpdate) error {
 	}
 	return nil
 }
-
