@@ -57,6 +57,7 @@ func Parse(r io.Reader) (*Export, error) {
 func NoteHash(n *Note) string {
 	h := md5.New()
 	h.Write([]byte(n.Title))
+	h.Write([]byte{0})
 	h.Write([]byte(n.Content))
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

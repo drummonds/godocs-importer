@@ -132,6 +132,39 @@ func TestPersistence(t *testing.T) {
 	}
 }
 
+func TestUpsertNoDuplicates(t *testing.T) {
+	trk := tempDB(t)
+
+	// First insert as error
+	trk.RecordImport("test.enex", "Note 1", "hash1", 0, "", StatusError)
+
+	// Retry succeeds — should upsert, not create a second row
+	trk.RecordImport("test.enex", "Note 1", "hash1", 0, "/uploaded/path", StatusUploaded)
+
+	rec, err := trk.GetRecord("hash1", 0)
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if rec.Status != StatusUploaded {
+		t.Errorf("status = %q, want uploaded", rec.Status)
+	}
+	if rec.GodocsPath != "/uploaded/path" {
+		t.Errorf("path = %q, want /uploaded/path", rec.GodocsPath)
+	}
+	if rec.ErrorText != "" {
+		t.Errorf("error_text = %q, want empty after successful retry", rec.ErrorText)
+	}
+
+	// Verify only one row exists
+	recs, err := trk.AllRecords("test.enex")
+	if err != nil {
+		t.Fatalf("AllRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Errorf("expected 1 record after upsert, got %d", len(recs))
+	}
+}
+
 // Ensure we don't leave temp files in working directory
 func TestNoLocalDB(t *testing.T) {
 	_, err := os.Stat("test.db")

@@ -92,4 +92,11 @@ func TestNoteHash(t *testing.T) {
 	if h1 == h3 {
 		t.Error("different content should produce different hash")
 	}
+
+	// Boundary ambiguity: "ab"+"c" vs "a"+"bc"
+	na := &Note{Title: "ab", Content: "c"}
+	nb := &Note{Title: "a", Content: "bc"}
+	if NoteHash(na) == NoteHash(nb) {
+		t.Error("boundary ambiguity should produce different hashes")
+	}
 }

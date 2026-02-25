@@ -60,6 +60,12 @@ func New(dbPath string) (*Tracker, error) {
 		return nil, fmt.Errorf("creating imports table: %w", err)
 	}
 
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_imports_hash_res ON imports (note_hash, resource_index)`)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("creating unique index: %w", err)
+	}
+
 	return &Tracker{db: db}, nil
 }
 
@@ -96,11 +102,16 @@ func (t *Tracker) GetRecord(noteHash string, resourceIndex int) (*Record, error)
 	return &r, nil
 }
 
-// RecordImport inserts a new import record.
+// RecordImport inserts or updates an import record.
 func (t *Tracker) RecordImport(enexFile, noteTitle, noteHash string, resourceIndex int, godocsPath, status string) error {
 	_, err := t.db.Exec(
 		`INSERT INTO imports (enex_file, note_title, note_hash, resource_index, godocs_path, status)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (note_hash, resource_index) DO UPDATE SET
+		   status = EXCLUDED.status,
+		   godocs_path = EXCLUDED.godocs_path,
+		   error_text = '',
+		   imported_at = NOW()`,
 		enexFile, noteTitle, noteHash, resourceIndex, godocsPath, status,
 	)
 	return err

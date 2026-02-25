@@ -263,14 +263,16 @@ func cmdImport(args []string) {
 
 		// Upload each resource, capture first ULID for tags/dimensions
 		var firstULID string
+		firstResIdx := -1
 		for j, res := range note.Resources {
 			ulid := importResource(client, trk, enexBase, &note, hash, &res, j, *destPath, i, &imported, &skippedAlready, &errored)
 			if firstULID == "" && ulid != "" {
 				firstULID = ulid
+				firstResIdx = j
 			}
 		}
 
-		applyTags(client, trk, &note, hash, firstULID, &warnings)
+		applyTags(client, trk, &note, hash, firstULID, firstResIdx, &warnings)
 		applyMetadata(client, &note, firstULID, &warnings)
 	}
 
@@ -294,6 +296,15 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		return ""
 	}
 
+	// Validate encoding attribute
+	if res.Data.Encoding != "" && res.Data.Encoding != "base64" {
+		fmt.Printf("[%d] %s / resource %d — unsupported encoding: %s\n", noteIdx+1, note.Title, resIdx, res.Data.Encoding)
+		trk.RecordImport(enexFile, note.Title, hash, resIdx, "", tracker.StatusError)
+		trk.UpdateStatus(hash, resIdx, tracker.StatusError, fmt.Sprintf("unsupported encoding: %s", res.Data.Encoding))
+		*errored++
+		return ""
+	}
+
 	// Decode base64 resource data
 	data, err := base64.StdEncoding.DecodeString(res.Data.Content)
 	if err != nil {
@@ -311,7 +322,6 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		fileName = fmt.Sprintf("%s_%d%s", safeFileName(note.Title), resIdx, ext)
 	}
 
-	uploadPath := filepath.Join(destPath, fileName)
 	result, err := client.UploadBytes(data, fileName, destPath)
 	if err != nil {
 		fmt.Printf("[%d] %s / %s — upload error: %v\n", noteIdx+1, note.Title, fileName, err)
@@ -322,7 +332,7 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 	}
 
 	fmt.Printf("[%d] %s / %s — uploaded to %s\n", noteIdx+1, note.Title, fileName, result.Path)
-	trk.RecordImport(enexFile, note.Title, hash, resIdx, uploadPath, tracker.StatusUploaded)
+	trk.RecordImport(enexFile, note.Title, hash, resIdx, result.Path, tracker.StatusUploaded)
 	*imported++
 	if result.ULID != "" {
 		trk.SetULID(hash, resIdx, result.ULID)
@@ -330,7 +340,7 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 	return result.ULID
 }
 
-func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string, warnings *int) {
+func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string, resIdx int, warnings *int) {
 	if len(note.Tags) == 0 {
 		return
 	}
@@ -355,10 +365,7 @@ func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, has
 		}
 	}
 
-	// Update tracker status for all resources
-	for j := range note.Resources {
-		trk.UpdateStatus(hash, j, tracker.StatusTagged, "")
-	}
+	trk.UpdateStatus(hash, resIdx, tracker.StatusTagged, "")
 }
 
 func applyMetadata(client *godocs.Client, note *enex.Note, ulid string, warnings *int) {

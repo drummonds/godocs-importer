@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -17,6 +16,7 @@ import (
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+	tagCache   map[string]int // name → ID
 }
 
 // NewClient creates a godocs API client.
@@ -24,6 +24,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		HTTPClient: &http.Client{Timeout: 60 * time.Second},
+		tagCache:   make(map[string]int),
 	}
 }
 
@@ -33,22 +34,6 @@ type Tag struct {
 	Name        string `json:"name"`
 	Color       string `json:"color"`
 	Description string `json:"description"`
-}
-
-// Document as returned by the godocs API.
-type Document struct {
-	ID           int    `json:"id"`
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	ULID         string `json:"ulid"`
-	DocumentType string `json:"document_type"`
-}
-
-// Job as returned by the godocs API.
-type Job struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
 }
 
 // UploadResult holds the response from the godocs upload API.
@@ -135,29 +120,6 @@ func (c *Client) doUpload(body io.Reader, contentType string) (*UploadResult, er
 	return &result, nil
 }
 
-// LookupByHash looks up a document by its MD5 file hash.
-func (c *Client) LookupByHash(hash string) (*Document, error) {
-	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/document/lookup?hash=%s", c.BaseURL, url.QueryEscape(hash)))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("lookup failed (status %d): %s", resp.StatusCode, b)
-	}
-
-	var doc Document
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, err
-	}
-	return &doc, nil
-}
-
 // GetTags returns all tags from godocs.
 func (c *Client) GetTags() ([]Tag, error) {
 	resp, err := c.HTTPClient.Get(c.BaseURL + "/api/tags")
@@ -195,20 +157,31 @@ func (c *Client) CreateTag(name string) (*Tag, error) {
 }
 
 // EnsureTag finds or creates a tag by name, returning its ID.
+// Results are cached for the lifetime of the client.
 func (c *Client) EnsureTag(name string) (int, error) {
-	tags, err := c.GetTags()
-	if err != nil {
-		return 0, err
+	if id, ok := c.tagCache[name]; ok {
+		return id, nil
 	}
-	for _, t := range tags {
-		if t.Name == name {
-			return t.ID, nil
+
+	// Populate cache on first miss
+	if len(c.tagCache) == 0 {
+		tags, err := c.GetTags()
+		if err != nil {
+			return 0, err
+		}
+		for _, t := range tags {
+			c.tagCache[t.Name] = t.ID
+		}
+		if id, ok := c.tagCache[name]; ok {
+			return id, nil
 		}
 	}
+
 	tag, err := c.CreateTag(name)
 	if err != nil {
 		return 0, err
 	}
+	c.tagCache[tag.Name] = tag.ID
 	return tag.ID, nil
 }
 
@@ -263,89 +236,3 @@ func (c *Client) UpdateMetadata(ulid string, meta MetadataUpdate) error {
 	return nil
 }
 
-// SearchDocument searches for a document by term and returns the first match.
-func (c *Client) SearchDocument(term string) (*Document, error) {
-	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/search?term=%s", c.BaseURL, url.QueryEscape(term)))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
-		return nil, nil
-	}
-
-	var result struct {
-		FileSystem []struct {
-			ULID     string `json:"ulid"`
-			Name     string `json:"name"`
-			FullPath string `json:"fullPath"`
-		} `json:"fileSystem"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	if len(result.FileSystem) == 0 {
-		return nil, nil
-	}
-	return &Document{
-		ULID: result.FileSystem[0].ULID,
-		Name: result.FileSystem[0].Name,
-		Path: result.FileSystem[0].FullPath,
-	}, nil
-}
-
-// GetActiveJobs returns currently active (pending/running) jobs.
-func (c *Client) GetActiveJobs() ([]Job, error) {
-	resp, err := c.HTTPClient.Get(c.BaseURL + "/api/jobs/active")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var jobs []Job
-	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
-		return nil, err
-	}
-	return jobs, nil
-}
-
-// WaitForIngestion polls active jobs until no ingestion jobs remain.
-func (c *Client) WaitForIngestion(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		jobs, err := c.GetActiveJobs()
-		if err != nil {
-			return err
-		}
-		active := false
-		for _, j := range jobs {
-			if j.Type == "ingestion" {
-				active = true
-				break
-			}
-		}
-		if !active {
-			return nil
-		}
-		time.Sleep(2 * time.Second)
-	}
-	return fmt.Errorf("ingestion did not complete within %v", timeout)
-}
-
-// GetLatestDocuments returns the most recent documents.
-func (c *Client) GetLatestDocuments(page int) ([]Document, error) {
-	resp, err := c.HTTPClient.Get(fmt.Sprintf("%s/api/documents/latest?page=%d", c.BaseURL, page))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Documents []Document `json:"documents"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result.Documents, nil
-}
