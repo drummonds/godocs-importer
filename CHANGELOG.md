@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.3.0] - 2026-02-28
+
+- Centralised client
+
 ## [0.2.2] - 2026-02-24
 
 - Claude driven bug fixing and syncing to godocs
