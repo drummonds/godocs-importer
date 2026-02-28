@@ -2,7 +2,12 @@ module github.com/drummonds/godocs-importer
 
 go 1.25.3
 
-require github.com/drummonds/go-postgres v0.3.0
+require (
+	github.com/drummonds/go-postgres v0.3.0
+	github.com/drummonds/godocs-client v0.0.0
+)
+
+replace github.com/drummonds/godocs-client => ../../minor/godocs-client
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	godocsclient "github.com/drummonds/godocs-client"
 	"github.com/drummonds/godocs-importer/internal/enex"
-	"github.com/drummonds/godocs-importer/internal/godocs"
 	"github.com/drummonds/godocs-importer/internal/tracker"
 )
 
@@ -52,11 +52,11 @@ Commands:
 
 func cmdPing(args []string) {
 	fs := flag.NewFlagSet("ping", flag.ExitOnError)
-	godocsURL := fs.String("godocs-url", "", "godocs server URL (required)")
+	godocsURL := fs.String("godocs-url", os.Getenv("GODOCS_URL"), "godocs server URL (or set GODOCS_URL env)")
 	fs.Parse(args)
 
 	if *godocsURL == "" {
-		log.Fatal("usage: godocs-importer ping --godocs-url <url>")
+		log.Fatal("usage: godocs-importer ping --godocs-url <url>\n       (or set GODOCS_URL environment variable)")
 	}
 
 	fmt.Printf("Pinging %s ...\n", *godocsURL)
@@ -220,13 +220,13 @@ func countStatus(status string, pending, imported, errored *int) {
 func cmdImport(args []string) {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	dbPath := fs.String("db", "imports.db", "tracker database path")
-	godocsURL := fs.String("godocs-url", "", "godocs server URL (required)")
+	godocsURL := fs.String("godocs-url", os.Getenv("GODOCS_URL"), "godocs server URL (or set GODOCS_URL env)")
 	destPath := fs.String("dest-path", "evernote", "destination path in godocs")
 	maxNotes := fs.Int("n", 0, "max notes to import (0 = all)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 || *godocsURL == "" {
-		log.Fatal("usage: godocs-importer import <file.enex> --godocs-url <url> [--db imports.db] [--dest-path <path>]")
+		log.Fatal("usage: godocs-importer import <file.enex> --godocs-url <url> [--db imports.db] [--dest-path <path>]\n       (or set GODOCS_URL environment variable)")
 	}
 	enexPath := fs.Arg(0)
 
@@ -241,7 +241,7 @@ func cmdImport(args []string) {
 	}
 	defer trk.Close()
 
-	client := godocs.NewClient(*godocsURL)
+	client := godocsclient.NewClient(*godocsURL)
 	enexBase := filepath.Base(enexPath)
 
 	notes := export.Notes
@@ -280,7 +280,7 @@ func cmdImport(args []string) {
 		imported, skippedAlready, skippedHTML, errored, warnings)
 }
 
-func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash string, res *enex.Resource, resIdx int, destPath string, noteIdx int, imported, skippedAlready, errored *int) string {
+func importResource(client *godocsclient.Client, trk *tracker.Tracker, enexFile string, note *enex.Note, hash string, res *enex.Resource, resIdx int, destPath string, noteIdx int, imported, skippedAlready, errored *int) string {
 	name := res.Attributes.FileName
 	if name == "" {
 		name = fmt.Sprintf("resource_%d", resIdx)
@@ -331,16 +331,22 @@ func importResource(client *godocs.Client, trk *tracker.Tracker, enexFile string
 		return ""
 	}
 
-	fmt.Printf("[%d] %s / %s — uploaded to %s\n", noteIdx+1, note.Title, fileName, result.Path)
-	trk.RecordImport(enexFile, note.Title, hash, resIdx, result.Path, tracker.StatusUploaded)
-	*imported++
+	if result.Duplicate {
+		fmt.Printf("[%d] %s / %s — already exists on server (ulid %s)\n", noteIdx+1, note.Title, fileName, result.ULID)
+		trk.RecordImport(enexFile, note.Title, hash, resIdx, result.Name, tracker.StatusUploaded)
+		*skippedAlready++
+	} else {
+		fmt.Printf("[%d] %s / %s — uploaded (ulid %s)\n", noteIdx+1, note.Title, fileName, result.ULID)
+		trk.RecordImport(enexFile, note.Title, hash, resIdx, result.Name, tracker.StatusUploaded)
+		*imported++
+	}
 	if result.ULID != "" {
 		trk.SetULID(hash, resIdx, result.ULID)
 	}
 	return result.ULID
 }
 
-func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string, resIdx int, warnings *int) {
+func applyTags(client *godocsclient.Client, trk *tracker.Tracker, note *enex.Note, hash string, ulid string, resIdx int, warnings *int) {
 	if len(note.Tags) == 0 {
 		return
 	}
@@ -368,14 +374,14 @@ func applyTags(client *godocs.Client, trk *tracker.Tracker, note *enex.Note, has
 	trk.UpdateStatus(hash, resIdx, tracker.StatusTagged, "")
 }
 
-func applyMetadata(client *godocs.Client, note *enex.Note, ulid string, warnings *int) {
+func applyMetadata(client *godocsclient.Client, note *enex.Note, ulid string, warnings *int) {
 	if ulid == "" {
 		fmt.Printf("  warning: skipping metadata for %q — no ULID\n", note.Title)
 		*warnings++
 		return
 	}
 
-	var meta godocs.MetadataUpdate
+	var meta godocsclient.MetadataUpdate
 	if !note.Created.IsZero() {
 		t := note.Created.Time
 		meta.CreatedDate = &t
