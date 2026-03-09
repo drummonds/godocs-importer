@@ -20,3 +20,12 @@ godocs-importer import export.enex --godocs-url http://localhost:8080
 ```bash
 go install github.com/drummonds/godocs-importer/cmd/godocs-importer@latest
 ```
+
+## Links
+
+| | |
+|---|---|
+| Documentation | https://h3-godocs-importer.statichost.page/ |
+| Source (Codeberg) | https://codeberg.org/hum3/godocs-importer |
+| Mirror (GitHub) | https://github.com/drummonds/godocs-importer |
+| Docs repo | https://codeberg.org/hum3/godocs-importer-docs |
