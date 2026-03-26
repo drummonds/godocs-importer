@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	godocsclient "github.com/drummonds/godocs-client"
-	"github.com/drummonds/godocs-importer/internal/enex"
-	"github.com/drummonds/godocs-importer/internal/tracker"
+	godocsclient "codeberg.org/hum3/godocs-client"
+	"codeberg.org/hum3/godocs-importer/internal/enex"
+	"codeberg.org/hum3/godocs-importer/internal/tracker"
 )
 
 func main() {
